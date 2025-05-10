@@ -1,0 +1,568 @@
+/*
+ * code.c
+ *
+ *  Created on: Sep 9, 2024
+ *      Author: hassan
+ */
+#include<avr/io.h>
+#include<avr/interrupt.h>
+#include<util/delay.h>
+unsigned char mode=0;/*mode flag 0 for default (increment) and 1 for count-*/
+unsigned char paused=0;/*pause flag*/
+unsigned char seg[]={0,1,2,3,4,5,6,7,8,9};/*array of seven segment values to display*/
+unsigned char sec=0,min=0,hr=0;/*time variables*/
+unsigned char sec_dig1=0,sec_dig2=0,min_dig1=0,min_dig2=0,hr_dig1=0,hr_dig2=0;/*digits display variables*/
+
+/*initialize timer1*/
+void Timer1_COMPA_init(void)
+{
+	TCCR1A=(1<<FOC1A);
+	TCCR1B=(1<<WGM12)|(1<<CS12);
+	/*Timer1 Compare mode
+	 * set prescaler=256
+	 * F_CPU=16*10^6
+	 * number of compare matches needed for 1 second count=62500
+	 */
+	TIMSK|=(1<<OCIE1A);/*Enable Timer1 Compare Match A interrupt */
+	TCNT1=0;
+	OCR1A=62500;
+}
+
+/*Initialize INT0 for reset*/
+void INT0_init(void)
+{
+	DDRD&=~(1<<PD2);
+	PORTD|=(1<<PD2);/*Enable internal pull up*/
+	MCUCR|=(1<<ISC01);/*set interrupt to falling edge*/
+	MCUCR &=~(1<<ISC00);
+	GICR |=(1<<6);/*enable INT0*/
+	GIFR|=(1<<INTF0);/*clear INT0 flag*/
+}
+
+/*Initialize INT1 for Pause*/
+void INT1_init(void)
+{
+	DDRD&=~(1<<PD3);
+	MCUCR|=(1<<ISC11)|(1<<ISC10);/*set interrupt to rising edge*/
+	GICR|=(1<<INT1);/*enable INT1*/
+	GIFR|=(1<<INTF1);/*clear INT1 flag*/
+}
+
+/*Initialize INT2 for Resume*/
+void INT2_init(void)
+{
+	DDRB&=~(1<<PB2);
+	PORTB|=(1<<PB2);/*enable internal pull up resistor*/
+	MCUCSR&=~(1<<ISC2);
+	GICR|=(1<<INT2);/*enable INT2*/
+	GIFR|=(1<<INTF2);/*clear INT2 flag*/
+}
+
+/* Function to dislay the multiplexed 6  7_segments */
+void display_7_segment(void)
+{
+	/*Display the Seconds*/
+	PORTA &=~(1<<PA5)&~(1<<PA3)&~(1<<PA2)&~(1<<PA1)&~(1<<PA0);
+	PORTA |=(1<<PA4);
+	PORTC = seg [sec_dig2];
+	_delay_ms(2);
+
+	PORTA &=~(1<<PA4)&~(1<<PA3)&~(1<<PA2)&~(1<<PA1)&~(1<<PA0);
+	PORTA |=(1<<PA5);
+	PORTC = seg [sec_dig1];
+	_delay_ms(2);
+
+	/*Display the Minutes*/
+	PORTA &=~(1<<PA4)&~(1<<PA3)&~(1<<PA5)&~(1<<PA1)&~(1<<PA0);
+	PORTA |=(1<<PA2);
+	PORTC = seg [min_dig2];
+	_delay_ms(2);
+
+	PORTA &=~(1<<PA4)&~(1<<PA5)&~(1<<PA2)&~(1<<PA1)&~(1<<PA0);
+	PORTA |=(1<<PA3);
+	PORTC = seg [min_dig1];
+	_delay_ms(2);
+
+	/*Display the Hours*/
+	PORTA &=~(1<<PA4)&~(1<<PA3)&~(1<<PA2)&~(1<<PA1)&~(1<<PA5);
+	PORTA |=(1<<PA0);
+	PORTC = seg [hr_dig2];
+	_delay_ms(2);
+
+	PORTA &=~(1<<PA4)&~(1<<PA3)&~(1<<PA2)&~(1<<PA5)&~(1<<PA0);
+	PORTA |=(1<<PA1);
+	PORTC = seg [hr_dig1];
+	_delay_ms(2);
+}
+
+/*function to Increment the time for count up stop watch mode*/
+void increment_seg(void)
+{
+	sec++;/*increment seconds till it's =59 so it turns to a full minute and seconds start from zero*/
+
+	if(sec > 59)
+	{
+		sec = 0;
+		min++;/*increment minutes every 60 seconds*/
+		if (min > 59)
+		{
+			min = 0;
+			hr++;/*when minutes reach 59 it's a full hour so increment hours by one and set minutes to zero again*/
+			if (hr > 23)
+			{
+				hr = 0;/*when hours reach 24 hours it's a full day so the time resets to zero and starts over*/
+			}
+		}
+	}
+
+	sec_dig2 = sec/10;
+	sec_dig1 = sec - sec_dig2*10 ;
+
+	min_dig2 = min/10;
+	min_dig1 = min - min_dig2*10 ;
+
+	hr_dig2 = hr/10;
+	hr_dig1 = hr - hr_dig2*10 ;
+}
+
+/*Function to decrement the time for Count down/Timer/Alarm mode*/
+void decrement_seg(void)
+{
+	if(sec!=0)
+	{
+		sec--;
+	}
+	else
+	{
+		if((min!=0)|(hr!=0))
+		{
+			sec=59;
+			if(min!=0)
+			{
+				min--;
+				{
+					if(hr!=0)
+					{
+						min=59;
+						hr--;
+						if(hr==0)
+						{
+							hr=24;
+						}
+					}
+				}
+			}
+			else
+			{
+				min=59;
+				hr--;
+			}
+		}
+		else
+		{
+			DDRD|=(1<<PD0);/*alarm when time reaches 00:00:00*/
+			PORTD|=(1<<PD0);
+		}
+	}
+	sec_dig2 = sec/10;
+	sec_dig1 = sec - sec_dig2*10 ;
+
+	min_dig2 = min/10;
+	min_dig1 = min - min_dig2*10 ;
+
+	hr_dig2 = hr/10;
+	hr_dig1 = hr - hr_dig2*10 ;
+}
+
+/*function used to adjust the Hour(increment) */
+void increment_hours(void)
+{
+	if(hr<24)
+	{
+		hr++;
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+	else
+	{
+		PORTC=0;
+		sec=0;
+		min=0;
+		hr=0;
+		sec_dig1=0 ;
+		sec_dig2=0 ;
+		min_dig1=0;
+		min_dig2=0;
+		hr_dig1=0;
+		hr_dig2=0;
+		_delay_ms(1);
+	}
+}
+
+/*function used to adjust minutes (increment)*/
+void increment_minutes(void)
+{
+	if(min<59)
+	{
+		min++;
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+	else
+	{
+		hr++;
+		min=0;
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+
+}
+
+/*function used to adjust seconds*/
+void increment_seconds(void)
+{
+	if(sec<59)
+	{
+		sec++;
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+	else
+	{
+		sec=0;
+		min++;
+		if(min>59)
+		{
+			min=0;
+			hr++;
+			if(paused==0)
+			{
+				TIMSK|=(1<<OCIE1A);/*make sure the time enable is on after the increment*/
+			}
+		}
+	}
+}
+
+/*function used to adjust the Hour(decrement) */
+void decrement_hours(void)
+{
+	if(hr!=0)
+	{
+		hr--;
+		if(hr<0)
+		{
+			hr=24;
+		}
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+}
+
+/*function used to adjust the Minutes(decrement) */
+void decrement_minutes(void)
+{
+	if(min!=0)
+	{
+		min--;
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+	else
+	{
+		if(hr!=0)
+		{
+			hr--;
+			min=59;
+		}
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+}
+
+/*function used to adjust the Seconds(decrement) */
+void decrement_seconds(void)
+{
+	if(sec!=0)
+	{
+		sec--;
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+	else
+	{
+		if((hr!=0)||(min!=0))
+		{
+			if(min!=0)
+			{
+				min--;
+				sec=59;
+			}
+			else if(hr!=0)
+			{
+				hr--;
+				sec=59;
+				min=59;
+			}
+		}
+		if(paused==0)
+		{
+			TIMSK|=(1<<OCIE1A);
+		}
+	}
+}
+
+/*Switch from mode0 to mode1 and vice versa*/
+void toggle_mode()
+{
+	mode=!mode;
+}
+
+/*INT0 ISR (reset)*/
+ISR(INT0_vect)
+{
+	/*clear PORTC*/
+	PORTC=0;
+	/*set values to 0*/
+	sec=0;
+	min=0;
+	hr=0;
+	/*set digits on the 7_segment to zero */
+	sec_dig1=0 ;
+	sec_dig2=0 ;
+	min_dig1=0;
+	min_dig2=0;
+	hr_dig1=0;
+	hr_dig2=0;
+	_delay_ms(1);
+}
+
+/*INT1 ISR (pause)*/
+ISR(INT1_vect)
+{
+	paused=1;/*set pause flag to 1*/
+}
+
+/*INT2 ISR (resume)*/
+ISR(INT2_vect)
+{
+	paused=0;/*set pause flag to zero in order to resume */
+}
+
+/*Timer ISR (sends interrupt every second with increment or decrement)*/
+ISR(TIMER1_COMPA_vect)
+{
+	if(paused==0)/*make sure the pause flag==0*/
+	{
+		if(mode==0)/* **default mode** increment stop watch*/
+		{
+			increment_seg();/*increment time (defaut mode)*/
+			PORTD&=~(1<<PD0);/*turns off the alarm if open */
+			PORTD|=(1<<PD4);/*turn on the red LED*/
+			PORTD&=~(1<<PD5);/*turn off the yellow LED*/
+		}
+		else if(mode==1)/*count down mode*/
+		{
+			decrement_seg();/*count down mode*/
+			PORTD|=(1<<PD5);/*turn on the yellow LED*/
+			PORTD&=~(1<<PD4);/*turn off the red LED*/
+		}
+	}
+}
+
+int main(void)
+{
+	DDRD |=(1<<PD4)|(1<<PD5)|(1<<PD0);
+	PORTD&=~(1<<PD4)&~(1<<PD5)&~(1<<PD0);
+	DDRC  |= 0x0F;
+	PORTC &= 0xF0;
+	DDRA  |=(1<<PA0)|(1<<PA1)|(1<<PA2)|(1<<PA3)|(1<<PA4)|(1<<PA5);
+	PORTA |=(1<<PA0)|(1<<PA1)|(1<<PA2)|(1<<PA3)|(1<<PA4)|(1<<PA5);
+	DDRB=0x00;
+	PORTB=0xFF;
+	SREG  |= (1<<7);
+	INT0_init();
+	INT1_init();
+	INT2_init();
+	Timer1_COMPA_init();
+	while(1)
+	{
+		display_7_segment();
+
+		/*ADJUST HOURS*/
+		if(!(PINB & (1<<PB1)))//increment
+		{
+			_delay_ms(30);
+			if(!(PINB & (1<<PB1)))
+			{
+				increment_hours();
+				sec_dig2 = sec/10;
+				sec_dig1 = sec - sec_dig2*10 ;
+
+				min_dig2 = min/10;
+				min_dig1 = min - min_dig2*10 ;
+
+				hr_dig2 = hr/10;
+				hr_dig1 = hr - hr_dig2*10 ;
+			}
+			while( !(PINB & (1<<PB1)) )
+			{
+				display_7_segment();
+			}
+		}
+
+		if(!(PINB & (1<<PB0)))//decrement
+		{
+			_delay_ms(30);
+			if(!(PINB & (1<<PB0)))
+			{
+				decrement_hours();
+				sec_dig2 = sec/10;
+				sec_dig1 = sec - sec_dig2*10 ;
+
+				min_dig2 = min/10;
+				min_dig1 = min - min_dig2*10 ;
+
+				hr_dig2 = hr/10;
+				hr_dig1 = hr - hr_dig2*10 ;
+			}
+			while( !(PINB & (1<<PB0)) )
+			{
+				display_7_segment();
+			}
+		}
+
+		/*ADJUST MINUTES*/
+		if(!(PINB & (1<<PB4)))//increment
+		{
+			_delay_ms(30);
+			if(!(PINB & (1<<PB4)))
+			{
+				increment_minutes();
+				sec_dig2 = sec/10;
+				sec_dig1 = sec - sec_dig2*10 ;
+
+				min_dig2 = min/10;
+				min_dig1 = min - min_dig2*10 ;
+
+				hr_dig2 = hr/10;
+				hr_dig1 = hr - hr_dig2*10 ;
+			}
+			while( !(PINB & (1<<PB4)) )
+			{
+				display_7_segment();
+			}
+		}
+
+		if(!(PINB & (1<<PB3)))//decrement
+		{
+			_delay_ms(30);
+			if(!(PINB & (1<<PB3)))
+			{
+				decrement_minutes();
+				sec_dig2 = sec/10;
+				sec_dig1 = sec - sec_dig2*10 ;
+
+				min_dig2 = min/10;
+				min_dig1 = min - min_dig2*10 ;
+
+				hr_dig2 = hr/10;
+				hr_dig1 = hr - hr_dig2*10 ;
+			}
+			while( !(PINB & (1<<PB3)) )
+			{
+				display_7_segment();
+			}
+		}
+
+		/*ADJUST SECONDS*/
+		if(!(PINB & (1<<PB6)))//increment
+		{
+			_delay_ms(30);
+			if(!(PINB & (1<<PB6)))
+			{
+				increment_seconds();
+				sec_dig2 = sec/10;
+				sec_dig1 = sec - sec_dig2*10 ;
+
+				min_dig2 = min/10;
+				min_dig1 = min - min_dig2*10 ;
+
+				hr_dig2 = hr/10;
+				hr_dig1 = hr - hr_dig2*10 ;
+			}
+			while( !(PINB & (1<<PB6)) )
+			{
+				/*TO KEEP THE SEVEN SEGMENT DISPLAYING WHILE THE BUTTON IS PRESSED*/
+				display_7_segment();
+			}
+		}
+
+		if(!(PINB & (1<<PB5)))//decrement
+		{
+			_delay_ms(30);
+			if(!(PINB & (1<<PB5)))
+			{
+				decrement_seconds();
+				sec_dig2 = sec/10;
+				sec_dig1 = sec - sec_dig2*10 ;
+
+				min_dig2 = min/10;
+				min_dig1 = min - min_dig2*10 ;
+
+				hr_dig2 = hr/10;
+				hr_dig1 = hr - hr_dig2*10 ;
+			}
+			while( !(PINB & (1<<PB5)) )
+			{
+				/*TO KEEP THE SEVEN SEGMENT DISPLAYING WHILE THE BUTTON IS PRESSED*/
+				display_7_segment();
+			}
+		}
+
+		/*MODE CONTROL*/
+		if(!(PINB&(1<<PB7)))/*CHECK IF THE BUTTON IS PRESSED*/
+		{
+			_delay_ms(30);
+			if(!(PINB&(1<<PB7)))/*RECHECK AFTER DEBOUNCE DELAY*/
+			{
+				if(paused==0)/*CHECK IF THE CLOCK IS NOT PAUSED*/
+				{
+					/*TOGGLES MODE ONLY WHILE THE BUTTON IS PRESSED AND RETURN IT BACK TO DEFAULT AFTER RELEASE*/
+					toggle_mode();
+					while(!(PINB&(1<<PB7)))
+					{
+						/*TO KEEP THE SEVEN SEGMENT DISPLAYING WHILE THE BUTTON IS PRESSED*/
+						display_7_segment();
+					}
+					toggle_mode();
+				}
+				else if(paused==1)/*CHECK IF THE CLOCK IS PAUSED*/
+				{
+					/*SWITCH MODES TILL ITS PAUSED AND CLICKED AGAIN*/
+					toggle_mode();
+					while(!(PINB&(1<<PB7)))
+					{
+						/*TO KEEP THE SEVEN SEGMENT DISPLAYING WHILE THE BUTTON IS PRESSED*/
+						display_7_segment();
+					}
+				}
+			}
+		}
+	}
+}
